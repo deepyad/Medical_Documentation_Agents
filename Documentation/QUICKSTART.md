@@ -11,7 +11,7 @@
 
 ```bash
 # Clone or navigate to project directory
-cd Formly
+cd Medical_Documentation_Agents
 
 # Install dependencies
 pip install -r requirements.txt
@@ -26,9 +26,9 @@ cp .env.example .env
 ### 1. Basic Agent Run
 
 ```python
-from src.agent import FormlyAgent
+from src.agent import MedicalDocumentationAgent
 
-agent = FormlyAgent(use_mock_api=True)  # Use mock API for safe testing
+agent = MedicalDocumentationAgent(use_mock_api=True)  # Use mock API for safe testing
 
 state = agent.run(
     task_description="Create regulatory documents for a blood glucose monitor",
@@ -59,7 +59,7 @@ python run_agent.py
 # Set your LangSmith API key in .env
 LANGCHAIN_API_KEY=your_key_here
 LANGCHAIN_TRACING_V2=true
-LANGCHAIN_PROJECT=formly-agents
+LANGCHAIN_PROJECT=medical-documentation-agents
 ```
 
 ### 2. Run Evaluations
@@ -73,9 +73,9 @@ python run_evals.py
 Or programmatically:
 
 ```python
-from src.evals import FormlyEvaluator
+from src.evals import AgentEvaluator
 
-evaluator = FormlyEvaluator()
+evaluator = AgentEvaluator()
 results = evaluator.run_evaluation()
 ```
 
@@ -135,7 +135,7 @@ from src.mock_api import MockAPI
 mock_api = MockAPI(snapshot_data={...})
 
 # Use in agent
-agent = FormlyAgent(use_mock_api=True)
+agent = MedicalDocumentationAgent(use_mock_api=True)
 agent.mock_api = mock_api
 
 # Reset after eval

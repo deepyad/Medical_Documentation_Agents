@@ -1,6 +1,6 @@
 # Knowledge Layer Overview
 
-The Knowledge Layer supplies Formly Agents with compliant, context-aware information. It merges broad regulatory intelligence with client-specific insights so generated documents remain accurate, relevant, and auditable.
+The Knowledge Layer supplies Medical Documentation Agents with compliant, context-aware information. It merges broad regulatory intelligence with client-specific insights so generated documents remain accurate, relevant, and auditable.
 
 ---
 
@@ -17,7 +17,7 @@ The Knowledge Layer supplies Formly Agents with compliant, context-aware informa
 ```mermaid
 graph LR
     subgraph "Agent Layer"
-        Agent[FormlyAgent]
+        Agent[MedicalDocumentationAgent]
         Tools[Agent Tools]
     end
 

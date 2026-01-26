@@ -1,5 +1,5 @@
 """
-LangSmith evaluation setup for Formly agents.
+LangSmith evaluation setup for Medical Documentation agents.
 
 This module implements Section 2 of the requirement doc: "Evals for Agent Traces".
 
@@ -25,15 +25,15 @@ from typing import Dict, Any, List, Optional
 from langsmith import Client, traceable
 from langsmith.evaluation import evaluate, LangChainStringEvaluator
 from langsmith.schemas import Example, Run
-from src.agent import FormlyAgent
+from src.agent import MedicalDocumentationAgent
 from src.mock_api import MockAPI
 from src.models import AgentState
 import json
 
 
-class FormlyEvaluator:
+class AgentEvaluator:
     """
-    Evaluator for Formly agents using LangSmith.
+    Evaluator for Medical Documentation agents using LangSmith.
     
     This class implements the evaluation system described in Section 2. It provides
     a framework for evaluating agent performance safely using mock APIs and LangSmith
@@ -62,7 +62,7 @@ class FormlyEvaluator:
         self.client = client or Client()
         self.mock_api = MockAPI()
     
-    @traceable(name="formly_agent_run")
+    @traceable(name="medical_documentation_agent_run")
     def evaluate_agent(
         self,
         task_description: str,
@@ -96,7 +96,7 @@ class FormlyEvaluator:
         """
         # Use mock API for evals - this ensures no production data is affected
         # This implements "Agent Configuration Switch" from Section 2
-        agent = FormlyAgent(use_mock_api=True)
+        agent = MedicalDocumentationAgent(use_mock_api=True)
         
         # Optionally load snapshot data for more realistic evaluation
         # snapshot_data = self._load_snapshot()
@@ -332,8 +332,8 @@ class FormlyEvaluator:
             # Create new dataset from examples
             examples = self.create_eval_dataset()
             dataset = self.client.create_dataset(
-                dataset_name="formly_agent_evals",
-                description="Evaluation dataset for Formly agents"
+                dataset_name="medical_documentation_agent_evals",
+                description="Evaluation dataset for Medical Documentation agents"
             )
             self.client.create_examples(
                 inputs=[ex.inputs for ex in examples],
@@ -354,7 +354,7 @@ class FormlyEvaluator:
                 self.correctness_evaluator,   # Check for errors
                 self.safety_evaluator         # Verify no production impact
             ],
-            experiment_prefix="formly_agent",  # Prefix for experiment runs
+            experiment_prefix="medical_documentation_agent",  # Prefix for experiment runs
             max_concurrency=2  # Run 2 evaluations in parallel
         )
         

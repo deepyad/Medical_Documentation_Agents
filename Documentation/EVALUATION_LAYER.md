@@ -17,12 +17,12 @@ The Evaluation Layer provides a safe, repeatable environment to measure agent pe
 ```mermaid
 graph LR
     subgraph "Agent Layer"
-        Agent[FormlyAgent]
+        Agent[MedicalDocumentationAgent]
         Tools[Agent Tools]
     end
 
     subgraph "Evaluation Layer"
-        Evaluator[FormlyEvaluator]
+        Evaluator[AgentEvaluator]
         MockAPI[Mock API]
         MockDB[(Mock Database)]
         Metrics[Evaluation Metrics]
@@ -46,7 +46,7 @@ graph LR
 
 ## Core Components
 
-- **FormlyEvaluator**
+- **AgentEvaluator**
   - Spins up the agent in evaluation mode.
   - Coordinates snapshot loading, metric computation, and reporting.
   - Ensures every run starts from a known baseline.

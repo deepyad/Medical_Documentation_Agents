@@ -42,7 +42,7 @@ from src.mock_api import MockAPI
 import json
 
 
-class FormlyAgent:
+class MedicalDocumentationAgent:
     """
     Main agent for creating regulatory documents.
     
@@ -63,7 +63,7 @@ class FormlyAgent:
     
     def __init__(self, use_mock_api: bool = False):
         """
-        Initialize Formly agent.
+        Initialize Medical Documentation agent.
         
         Args:
             use_mock_api: Whether to use mock API (for evals)

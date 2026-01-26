@@ -1,6 +1,6 @@
-# Formly Agents - Complete Documentation
+# Medical Documentation Agents - Complete Documentation
 
-This directory contains all documentation for the Formly Agents project.
+This directory contains all documentation for the Medical Documentation Agents project.
 
 ## Documentation Files
 

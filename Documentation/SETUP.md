@@ -57,7 +57,7 @@ OPENAI_API_KEY=sk-...
 # LangSmith API Key (required for evaluations)
 LANGCHAIN_API_KEY=lsv2_...
 LANGCHAIN_TRACING_V2=true
-LANGCHAIN_PROJECT=formly-agents
+LANGCHAIN_PROJECT=medical-documentation-agents
 
 # Qdrant Configuration
 QDRANT_URL=http://localhost:6333
@@ -86,7 +86,7 @@ PRODUCTION_API_URL=http://localhost:8000
 
 ```bash
 # Test imports
-python -c "from src.agent import FormlyAgent; print('✓ Imports successful')"
+python -c "from src.agent import MedicalDocumentationAgent; print('✓ Imports successful')"
 
 # Test Qdrant connection
 python -c "from qdrant_client import QdrantClient; client = QdrantClient(url='http://localhost:6333'); print('✓ Qdrant connected')"
@@ -170,7 +170,7 @@ QDRANT_API_KEY=your_production_key
 ```bash
 # Enable LangSmith tracing
 LANGCHAIN_TRACING_V2=true
-LANGCHAIN_PROJECT=formly-agents-production
+LANGCHAIN_PROJECT=medical-documentation-agents-production
 ```
 
 3. Configure logging:
@@ -209,7 +209,7 @@ logging.basicConfig(level=logging.INFO)
 **Solution:**
 - Verify `LANGCHAIN_TRACING_V2=true` in `.env`
 - Check `LANGCHAIN_API_KEY` is set
-- Verify project name: `LANGCHAIN_PROJECT=formly-agents`
+- Verify project name: `LANGCHAIN_PROJECT=medical-documentation-agents`
 
 #### Issue: "Import errors"
 

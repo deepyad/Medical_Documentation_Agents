@@ -20,7 +20,7 @@ All code files now include comprehensive docstrings that:
 ### Section 2: Evals (`src/mock_api.py`, `src/evals.py`)
 - **MockDatabase**: Isolated database for safe evaluation
 - **MockAPI**: Mock API that mimics production
-- **FormlyEvaluator**: LangSmith integration for evaluations
+- **AgentEvaluator**: LangSmith integration for evaluations
 - All methods reference Section 2 safety requirements
 
 ### Section 3: RAG Pipeline (`src/rag_pipeline.py`)

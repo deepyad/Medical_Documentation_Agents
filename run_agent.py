@@ -1,4 +1,4 @@
-"""Main script to run the Formly agent.
+"""Main script to run the Medical Documentation agent.
 
 This entry point executes a single end-to-end workflow using the production
 API path (`use_mock_api=False`). It ships with a hard-coded sample task and
@@ -7,13 +7,13 @@ device payload so you can run it without providing any input. Modify the
 arguments—if you need to exercise different scenarios.
 """
 import asyncio
-from src.agent import FormlyAgent
+from src.agent import MedicalDocumentationAgent
 from src.config import settings
 
 
 def main():
     """Run the agent with a sample task."""
-    agent = FormlyAgent(use_mock_api=False)  # Set to True for evals
+    agent = MedicalDocumentationAgent(use_mock_api=False)  # Set to True for evals
     
     task_description = """
     Create regulatory documents for a new medical device submission.

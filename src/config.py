@@ -1,4 +1,4 @@
-"""Configuration settings for Formly agents."""
+"""Configuration settings for Medical Documentation agents."""
 import os
 from typing import Optional
 from pydantic_settings import BaseSettings
@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     
     # LangSmith Configuration
     langchain_tracing_v2: bool = os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
-    langchain_project: str = os.getenv("LANGCHAIN_PROJECT", "formly-agents")
+    langchain_project: str = os.getenv("LANGCHAIN_PROJECT", "medical-documentation-agents")
     
     # Vector Database
     qdrant_url: str = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     production_api_url: str = os.getenv("PRODUCTION_API_URL", "http://localhost:8000")
     
     # Database
-    database_url: str = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/formly")
+    database_url: str = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/medical_documentation")
     
     # Context Management
     context_window_limit: int = 8000  # Tokens before compression

@@ -1,4 +1,4 @@
-"""Data models for Formly agents."""
+"""Data models for Medical Documentation agents."""
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum

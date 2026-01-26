@@ -27,4 +27,7 @@ pytest-asyncio>=0.21.0
 tenacity>=8.2.0
 tiktoken>=0.5.0
 
+# Model Context Protocol (MCP) for multi-agent communication
+mcp>=0.1.0
+
 

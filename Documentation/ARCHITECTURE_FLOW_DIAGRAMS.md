@@ -1,11 +1,11 @@
 # Architecture and Flow Diagrams
 
-This document provides comprehensive flow diagrams showing how all components of the Formly Agents system are connected and interact with each other.
+This document provides comprehensive flow diagrams showing how all components of the Medical Documentation Agents system are connected and interact with each other.
 
 ## Table of Contents
 
 1. [Project Overview and Motivation](#project-overview-and-motivation)
-   - What is Formly Agents?
+   - What is Medical Documentation Agents?
    - Core Motivation
    - Business Value Proposition
    - The Problem We're Solving
@@ -36,9 +36,9 @@ This document provides comprehensive flow diagrams showing how all components of
 
 ## Project Overview and Motivation
 
-### What is Formly Agents?
+### What is Medical Documentation Agents?
 
-**Formly Agents** is an AI-powered system designed to automate the creation of regulatory documentation for medical devices. The system uses advanced AI agents powered by LangGraph and LangChain to assist consultants and regulatory professionals in preparing FDA submissions, specifically 510(k) premarket notifications.
+**Medical Documentation Agents** is an AI-powered system designed to automate the creation of regulatory documentation for medical devices. The system uses advanced AI agents powered by LangGraph and LangChain to assist consultants and regulatory professionals in preparing FDA submissions, specifically 510(k) premarket notifications.
 
 ### Core Motivation
 
@@ -51,7 +51,7 @@ The medical device regulatory industry faces significant challenges:
 5. **Lack of Automation**: Most processes are manual, copy-paste operations with little automation
 6. **Risk of Mistakes**: Errors in regulatory documents can lead to rejection, delays, or even safety issues
 
-**Formly Agents** was created to solve these challenges by providing an intelligent, automated system that:
+**Medical Documentation Agents** was created to solve these challenges by providing an intelligent, automated system that:
 - Reduces documentation time by 70-90%
 - Ensures consistency and accuracy across all documents
 - Leverages AI to search and understand regulatory documents
@@ -100,7 +100,7 @@ Traditional approaches involve:
 
 ### Our Solution
 
-Formly Agents addresses these challenges through:
+Medical Documentation Agents addresses these challenges through:
 
 #### 🤖 **Intelligent Automation**
 - **Multi-Document Agent**: Creates 10+ interconnected regulatory documents automatically
@@ -173,7 +173,7 @@ Medical device regulatory documentation is one of the most complex and critical 
 
 #### Transformative Impact
 
-Formly Agents transforms this process by:
+Medical Documentation Agents transforms this process by:
 
 **For Regulatory Consultants:**
 - **Time Savings**: Reduces weeks of manual work to hours (70-90% reduction)
@@ -322,7 +322,7 @@ graph TB
     end
     
     subgraph "Agent Layer"
-        Agent[FormlyAgent<br/>LangGraph Orchestrator]
+        Agent[MedicalDocumentationAgent<br/>LangGraph Orchestrator]
         Tools[Agent Tools]
         ContextMgr[Context Manager<br/>Section 5]
     end
@@ -340,7 +340,7 @@ graph TB
     end
     
     subgraph "Evaluation Layer"
-        Evaluator[FormlyEvaluator<br/>Section 2]
+        Evaluator[AgentEvaluator<br/>Section 2]
         LangSmith[LangSmith<br/>Tracing & Eval]
     end
     
@@ -382,7 +382,7 @@ This diagram shows the detailed component structure and their relationships.
 
 ```mermaid
 graph LR
-    subgraph "FormlyAgent - Main Orchestrator"
+    subgraph "MedicalDocumentationAgent - Main Orchestrator"
         Plan[Plan Phase]
         Research[Research Phase]
         Create[Create Documents Phase]
@@ -541,7 +541,7 @@ This diagram shows how data flows through the system during agent execution.
 ```mermaid
 sequenceDiagram
     participant User
-    participant Agent as FormlyAgent
+    participant Agent as MedicalDocumentationAgent
     participant Tools as Agent Tools
     participant RAG as RAG Pipeline
     participant KR as Knowledge Retrieval
@@ -654,7 +654,7 @@ graph TB
     end
     
     subgraph "Agent Orchestration"
-        Agent[FormlyAgent]
+        Agent[MedicalDocumentationAgent]
         Tools[Agent Tools]
         Workflow[LangGraph Workflow]
     end
@@ -857,7 +857,7 @@ This diagram shows the dependency relationships between components.
 ```mermaid
 graph TD
     subgraph "Core Dependencies"
-        Agent[FormlyAgent] --> Tools[Agent Tools]
+        Agent[MedicalDocumentationAgent] --> Tools[Agent Tools]
         Agent --> ContextMgr[Context Manager]
         Agent --> Workflow[LangGraph Workflow]
     end
@@ -892,7 +892,7 @@ graph TD
     end
     
     subgraph "Evaluation Dependencies"
-        Evaluator[FormlyEvaluator] --> Agent
+        Evaluator[AgentEvaluator] --> Agent
         Evaluator --> LangSmith[LangSmith]
         Evaluator --> MockAPI
     end
