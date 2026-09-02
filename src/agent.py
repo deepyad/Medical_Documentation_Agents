@@ -35,11 +35,13 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from src.config import settings
-from src.models import AgentState, TodoItem, TaskStatus, DocumentType
+from src.models import AgentState, TodoItem, TaskStatus, DocumentType, PlanOutput
 from src.tools import AGENT_TOOLS
 from src.context_manager import ContextManager
 from src.mock_api import MockAPI
-import json
+from src.postgres_api import PostgresAPI
+from src.rollback import RollbackManager, InMemoryRollbackStorage, PostgresRollbackStorage
+from src import tool_impl
 
 
 class MedicalDocumentationAgent:
@@ -61,28 +63,46 @@ class MedicalDocumentationAgent:
                involves researching regulatory requirements, clinical data, similar devices etc."
     """
     
-    def __init__(self, use_mock_api: bool = False):
+    def __init__(self, use_mock_api: bool = False, mock_snapshot_data: Optional[Dict[str, Any]] = None):
         """
         Initialize Medical Documentation agent.
-        
+
         Args:
             use_mock_api: Whether to use mock API (for evals)
                          True = Use MockAPI (Section 2) for safe evaluation
                          False = Use production API (Section 1 rollback system)
-        
+            mock_snapshot_data: Optional pre-existing documents/forms to seed MockAPI
+                         with (ignored when use_mock_api=False). Without this, every
+                         eval run starts from a completely empty mock database, so
+                         update_document/update_form_answer paths are never exercised
+                         — see ADR F6.
+
         Reference: requirement doc - Section 2: "Agent Configuration Switch: Design the agent
                    or its orchestration framework to switch target endpoints (production API
                    or mock API) based on the mode: evaluation/testing vs live execution"
         """
         self.llm = ChatOpenAI(
-            model="gpt-4-turbo-preview",
+            model=settings.openai_model,
             temperature=0,
             api_key=settings.openai_api_key
         )
-        
+        # Structured-output variant used by _plan_phase — see ADR B3: this
+        # replaces free-text-plus-json.loads() parsing, which had a bare
+        # except: silently masking any malformed LLM output.
+        self.planning_llm = self.llm.with_structured_output(PlanOutput)
+
         self.use_mock_api = use_mock_api
-        self.mock_api = MockAPI() if use_mock_api else None
-        
+        self.mock_api = MockAPI(snapshot_data=mock_snapshot_data) if use_mock_api else None
+
+        # Point the tools' write path at isolated eval storage or durable
+        # production storage based on mode. See ADR E5.
+        if use_mock_api:
+            tool_impl.configure_api(self.mock_api)
+            tool_impl.configure_rollback_manager(RollbackManager(InMemoryRollbackStorage()))
+        else:
+            tool_impl.configure_api(PostgresAPI())
+            tool_impl.configure_rollback_manager(RollbackManager(PostgresRollbackStorage()))
+
         self.context_manager = ContextManager()
         
         # Create agent with tools
@@ -127,8 +147,37 @@ When creating documents, ensure they are comprehensive and based on retrieved in
             agent=agent,
             tools=AGENT_TOOLS,
             verbose=True,
-            handle_parsing_errors=True
+            handle_parsing_errors=True,
+            return_intermediate_steps=True  # exposes raw tool results — see ADR F3
         )
+
+    @staticmethod
+    def _extract_tool_errors(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Pull structured tool failures out of AgentExecutor's intermediate steps.
+
+        Individual tool results (e.g. {"success": False, "error": ...} from
+        create_document/update_document/update_form_answer/rollback_transaction)
+        are otherwise only visible as unstructured text folded into the agent's
+        final text output — nothing surfaces them as data. See ADR F3.
+
+        Args:
+            result: Return value of self.agent_executor.invoke(...)
+
+        Returns:
+            List of {"tool", "tool_input", "result"} dicts, one per failed call.
+        """
+        errors = []
+        for action, observation in result.get("intermediate_steps", []):
+            if isinstance(observation, dict) and (
+                observation.get("success") is False or "error" in observation
+            ):
+                errors.append({
+                    "tool": getattr(action, "tool", None),
+                    "tool_input": getattr(action, "tool_input", None),
+                    "result": observation
+                })
+        return errors
     
     def _build_workflow(self) -> StateGraph:
         """Build LangGraph workflow."""
@@ -192,36 +241,26 @@ When creating documents, ensure they are comprehensive and based on retrieved in
 Create a detailed todo list for creating all required documents. Break down the work into:
 1. Research tasks (regulatory requirements, similar devices, clinical data)
 2. Document creation tasks (one per document type)
-3. Review and revision tasks
+3. Review and revision tasks"""
 
-Return a JSON list of todos with descriptions and dependencies."""
-        
-        response = self.llm.invoke([
+        # Structured output (PlanOutput) guarantees a valid, schema-conforming
+        # response — no free-text JSON to parse, so no parse-failure class to
+        # silently swallow. If the LLM call itself fails, that propagates
+        # normally rather than being masked by a fallback plan. See ADR B3.
+        plan = self.planning_llm.invoke([
             SystemMessage(content="You are a planning agent. Create detailed todo lists."),
             HumanMessage(content=planning_prompt)
         ])
-        
-        # Parse todos from response
-        try:
-            todos_data = json.loads(response.content)
-            todos = [
-                TodoItem(
-                    id=f"todo_{i}",
-                    description=item.get("description", ""),
-                    dependencies=item.get("dependencies", [])
-                )
-                for i, item in enumerate(todos_data)
-            ]
-        except:
-            # Fallback: create basic todos
-            todos = [
-                TodoItem(id="todo_0", description="Research regulatory requirements"),
-                TodoItem(id="todo_1", description="Find similar devices"),
-                TodoItem(id="todo_2", description="Gather clinical data"),
-                TodoItem(id="todo_3", description="Create regulatory documents"),
-                TodoItem(id="todo_4", description="Review and revise documents")
-            ]
-        
+
+        todos = [
+            TodoItem(
+                id=f"todo_{i}",
+                description=item.description,
+                dependencies=item.dependencies
+            )
+            for i, item in enumerate(plan.todos)
+        ]
+
         return {"todos": todos}
     
     def _research_phase(self, state: AgentState) -> Dict[str, Any]:
@@ -266,24 +305,25 @@ Use the available tools to:
             "input": research_input,
             "chat_history": state.messages
         })
-        
+
         # Update todo
         current_todo.status = TaskStatus.COMPLETED
         current_todo.result = {"research_output": result.get("output", "")}
-        
+
         # Add to context
         self.context_manager.add_to_segment(
             "research",
             result.get("output", ""),
             relevance=1.0
         )
-        
+
         return {
             "todos": state.todos,
             "messages": state.messages + [
                 {"role": "user", "content": research_input},
                 {"role": "assistant", "content": result.get("output", "")}
-            ]
+            ],
+            "tool_errors": state.tool_errors + self._extract_tool_errors(result)
         }
     
     def _create_documents_phase(self, state: AgentState) -> Dict[str, Any]:
@@ -316,17 +356,18 @@ Use the create_document tool to create the document with all relevant informatio
             "input": creation_input,
             "chat_history": state.messages
         })
-        
+
         # Update todo
         current_todo.status = TaskStatus.COMPLETED
         current_todo.result = result
-        
+
         return {
             "todos": state.todos,
             "messages": state.messages + [
                 {"role": "user", "content": creation_input},
                 {"role": "assistant", "content": result.get("output", "")}
-            ]
+            ],
+            "tool_errors": state.tool_errors + self._extract_tool_errors(result)
         }
     
     def _review_phase(self, state: AgentState) -> Dict[str, Any]:
@@ -343,12 +384,13 @@ Check for:
             "input": review_prompt,
             "chat_history": state.messages
         })
-        
+
         return {
             "messages": state.messages + [
                 {"role": "user", "content": review_prompt},
                 {"role": "assistant", "content": result.get("output", "")}
-            ]
+            ],
+            "tool_errors": state.tool_errors + self._extract_tool_errors(result)
         }
     
     def _compress_context_node(self, state: AgentState) -> Dict[str, Any]:

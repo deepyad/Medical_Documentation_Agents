@@ -1,0 +1,23 @@
+{
+  "documents": {
+    "doc_seed_001": {
+      "id": "doc_seed_001",
+      "type": "regulatory",
+      "title": "Existing Regulatory Requirements Summary",
+      "content": "Baseline regulatory requirements summary, seeded so eval runs have a pre-existing document to update rather than only ever exercising create_document.",
+      "metadata": {"seeded": true},
+      "status": "draft",
+      "created_at": "2026-01-01T00:00:00"
+    }
+  },
+  "forms": {
+    "form_seed_001": {
+      "id": "form_seed_001",
+      "answers": {
+        "device_name": "Seed Device",
+        "device_class": "Class II"
+      },
+      "created_at": "2026-01-01T00:00:00"
+    }
+  }
+}

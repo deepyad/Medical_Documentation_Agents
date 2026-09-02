@@ -52,6 +52,17 @@ class TodoItem(BaseModel):
     completed_at: Optional[datetime] = None
 
 
+class PlannedTodo(BaseModel):
+    """A single todo as proposed by the planning LLM, before ids/status are assigned."""
+    description: str
+    dependencies: List[str] = Field(default_factory=list)
+
+
+class PlanOutput(BaseModel):
+    """Structured output schema for the planning phase (see MedicalDocumentationAgent._plan_phase)."""
+    todos: List[PlannedTodo]
+
+
 class DocumentChunk(BaseModel):
     """Document chunk for RAG."""
     chunk_id: str
@@ -87,6 +98,7 @@ class AgentState(BaseModel):
     device_info: Optional[Dict[str, Any]] = None
     retrieved_knowledge: List[KnowledgeChunk] = Field(default_factory=list)
     messages: List[Dict[str, Any]] = Field(default_factory=list)
+    tool_errors: List[Dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None
 
 

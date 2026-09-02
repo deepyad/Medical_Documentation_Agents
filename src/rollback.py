@@ -19,48 +19,161 @@ Implementation Strategy:
 3. Rollback API: Provide endpoint-like functionality to rollback transactions
 4. Audit Logging: Maintain transaction log for all changes
 
+Storage is pluggable (see RollbackStorage below): InMemoryRollbackStorage for eval-mode isolation,
+PostgresRollbackStorage for a durable production audit trail.
+
 Reference: requirement doc - Section 1: Rollbacks
 """
-import json
-from typing import Dict, Any, Optional, List
-from datetime import datetime
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional
 import uuid
+
 from src.models import Transaction, TaskStatus
+
+
+class RollbackStorage(ABC):
+    """Storage backend interface for rollback transactions."""
+
+    @abstractmethod
+    def save(self, transaction: Transaction) -> None:
+        """Persist a transaction (insert or update by transaction_id)."""
+
+    @abstractmethod
+    def get(self, transaction_id: str) -> Optional[Transaction]:
+        """Fetch a transaction by ID."""
+
+    @abstractmethod
+    def list(
+        self,
+        client_id: Optional[str] = None,
+        action_type: Optional[str] = None
+    ) -> List[Transaction]:
+        """List transactions, optionally filtered, newest first."""
+
+
+class InMemoryRollbackStorage(RollbackStorage):
+    """
+    Process-local, non-durable storage.
+
+    Used as the default and for eval mode, where transactions should stay isolated
+    to the run and not pollute the durable production audit trail.
+    """
+
+    def __init__(self):
+        self._transactions: Dict[str, Transaction] = {}
+
+    def save(self, transaction: Transaction) -> None:
+        self._transactions[transaction.transaction_id] = transaction
+
+    def get(self, transaction_id: str) -> Optional[Transaction]:
+        return self._transactions.get(transaction_id)
+
+    def list(
+        self,
+        client_id: Optional[str] = None,
+        action_type: Optional[str] = None
+    ) -> List[Transaction]:
+        transactions = list(self._transactions.values())
+
+        if client_id:
+            transactions = [t for t in transactions if t.client_id == client_id]
+        if action_type:
+            transactions = [t for t in transactions if t.action_type == action_type]
+
+        return sorted(transactions, key=lambda t: t.timestamp, reverse=True)
+
+
+class PostgresRollbackStorage(RollbackStorage):
+    """
+    Durable storage backed by Postgres.
+
+    Implements ADR E1 (Documentation/ARCHITECTURE_DECISIONS.md): transactions survive
+    process restarts and are shared across workers, giving the audit trail real
+    persistence instead of an in-memory dict.
+    """
+
+    def save(self, transaction: Transaction) -> None:
+        from src.db import get_session
+        from src.db_models import TransactionRecord
+
+        with get_session() as session:
+            record = session.get(TransactionRecord, transaction.transaction_id)
+            if record is None:
+                record = TransactionRecord(transaction_id=transaction.transaction_id)
+                session.add(record)
+
+            record.action_type = transaction.action_type
+            record.resource_id = transaction.resource_id
+            record.resource_type = transaction.resource_type
+            record.previous_state = transaction.previous_state
+            record.new_state = transaction.new_state
+            record.timestamp = transaction.timestamp
+            record.client_id = transaction.client_id
+            record.status = transaction.status.value
+
+    def get(self, transaction_id: str) -> Optional[Transaction]:
+        from src.db import get_session
+        from src.db_models import TransactionRecord
+
+        with get_session() as session:
+            record = session.get(TransactionRecord, transaction_id)
+            return self._to_model(record) if record else None
+
+    def list(
+        self,
+        client_id: Optional[str] = None,
+        action_type: Optional[str] = None
+    ) -> List[Transaction]:
+        from src.db import get_session
+        from src.db_models import TransactionRecord
+
+        with get_session() as session:
+            query = session.query(TransactionRecord)
+            if client_id:
+                query = query.filter(TransactionRecord.client_id == client_id)
+            if action_type:
+                query = query.filter(TransactionRecord.action_type == action_type)
+
+            records = query.order_by(TransactionRecord.timestamp.desc()).all()
+            return [self._to_model(record) for record in records]
+
+    @staticmethod
+    def _to_model(record) -> Transaction:
+        return Transaction(
+            transaction_id=record.transaction_id,
+            action_type=record.action_type,
+            resource_id=record.resource_id,
+            resource_type=record.resource_type,
+            previous_state=record.previous_state,
+            new_state=record.new_state,
+            timestamp=record.timestamp,
+            client_id=record.client_id,
+            status=TaskStatus(record.status),
+        )
 
 
 class RollbackManager:
     """
     Manages rollbacks for destructive agent actions.
-    
+
     This class implements the core rollback functionality as described in Section 1 of the requirement doc.
-    It maintains a transaction log and provides methods to create, track, and rollback transactions.
-    
-    Design Pattern: Transaction-based rollback system
-    - Before executing a destructive action, save the current state (snapshot)
-    - After execution, record the new state
-    - If rollback is needed, restore the previous state
-    
+    It delegates persistence to a pluggable RollbackStorage backend and provides methods to create,
+    track, and rollback transactions.
+
     Reference: requirement doc - Section 1: "Transaction Management with a Log"
     """
-    
-    def __init__(self, storage: Optional[Dict[str, Any]] = None):
+
+    def __init__(self, storage: Optional[RollbackStorage] = None):
         """
         Initialize rollback manager.
-        
-        Implements the "Maintain a Snapshot or Backup" strategy from Section 1.
-        Uses in-memory storage by default, but can be extended to use persistent storage
-        (database, file system, etc.) for production use.
-        
+
         Args:
-            storage: Optional storage backend (dict for in-memory, can be DB for production)
-                    In production, this could be a database connection or file-based storage
-                    to persist transactions across restarts.
-        
-        Reference: requirement doc - Section 1: "Maintain a Snapshot or Backup"
+            storage: Storage backend to use. Defaults to InMemoryRollbackStorage so the
+                    manager works without a database configured. Pass PostgresRollbackStorage()
+                    for a durable, production audit trail (see ADR E1).
         """
-        self.storage = storage or {}
-        self.transactions: Dict[str, Transaction] = {}
-    
+        self.storage = storage or InMemoryRollbackStorage()
+
     def create_transaction(
         self,
         action_type: str,
@@ -72,31 +185,18 @@ class RollbackManager:
     ) -> str:
         """
         Create a transaction record for a destructive action.
-        
-        This implements the "Track Each Action with an ID or Transaction ID" requirement
-        from Section 1. Every destructive operation returns a unique transaction ID that
-        can be used later for rollback.
-        
-        The transaction record captures:
-        - Action type (write, delete, update)
-        - Resource being modified
-        - Previous state (snapshot before action)
-        - New state (state after action)
-        - Timestamp for audit trail
-        
+
         Args:
             action_type: Type of action (write, delete, update)
-                        These are the destructive operations that need rollback capability
             resource_id: ID of the resource being modified
             resource_type: Type of resource (document, form, etc.)
             previous_state: State before the action (snapshot for rollback)
             new_state: State after the action (for verification)
             client_id: Optional client ID for multi-tenant scenarios
-            
+
         Returns:
             Transaction ID: Unique identifier for this transaction
-                           Used by the rollback endpoint to identify which action to undo
-            
+
         Reference: requirement doc - Section 1: "Track Each Action with an ID or Transaction ID"
         """
         transaction_id = str(uuid.uuid4())
@@ -109,62 +209,36 @@ class RollbackManager:
             new_state=new_state,
             client_id=client_id
         )
-        
-        # Store transaction for later retrieval and rollback
-        self.transactions[transaction_id] = transaction
-        self.storage[transaction_id] = {
-            "transaction": transaction.model_dump(),
-            "can_rollback": True
-        }
-        
+
+        self.storage.save(transaction)
+
         return transaction_id
-    
+
     def rollback(self, transaction_id: str) -> Dict[str, Any]:
         """
         Rollback a transaction.
-        
-        This implements the "Rollback API Endpoint" functionality from Section 1.
-        When a user realizes the agent made a mistake, they can call this method
-        (or the corresponding API endpoint) to undo the changes.
-        
-        The rollback process:
-        1. Look up the transaction by ID
-        2. Retrieve the previous state (snapshot)
-        3. Restore the resource to the previous state
-        4. Mark transaction as rolled back
-        
+
         Args:
             transaction_id: ID of transaction to rollback
-                          This is the ID returned when the original action was executed
-            
+
         Returns:
-            Dict containing:
-            - success: Whether rollback was successful
-            - previous_state: State to restore (used by API layer to actually restore)
-            - transaction_id: Confirmation of which transaction was rolled back
-            - error: Error message if rollback failed
-        
+            Dict containing success, previous_state (for the caller to restore), and
+            transaction/resource identifiers, or an error message if not found.
+
         Reference: requirement doc - Section 1: "Design a Rollback API Endpoint"
         Reference: requirement doc - Section 1: "User Invokes Rollback on Realizing a Mistake"
         """
-        if transaction_id not in self.transactions:
+        transaction = self.storage.get(transaction_id)
+
+        if transaction is None:
             return {
                 "success": False,
                 "error": f"Transaction {transaction_id} not found"
             }
-        
-        transaction = self.transactions[transaction_id]
-        
-        # Mark transaction as rolled back (create new instance with updated status)
-        # This maintains audit trail showing that rollback occurred
-        transaction = Transaction(
-            **transaction.model_dump(),
-            status=TaskStatus.ROLLED_BACK
-        )
-        self.transactions[transaction_id] = transaction
-        
-        # Return previous state for restoration
-        # The calling code (API layer) will use this to actually restore the state
+
+        transaction = transaction.model_copy(update={"status": TaskStatus.ROLLED_BACK})
+        self.storage.save(transaction)
+
         return {
             "success": True,
             "transaction_id": transaction_id,
@@ -173,24 +247,53 @@ class RollbackManager:
             "resource_id": transaction.resource_id,
             "resource_type": transaction.resource_type
         }
-    
-    def get_transaction(self, transaction_id: str) -> Optional[Transaction]:
+
+    def rollback_group(self, transaction_ids: List[str]) -> Dict[str, Any]:
         """
-        Get transaction by ID.
-        
-        Utility method for retrieving transaction details. Useful for:
-        - Verifying transaction status
-        - Auditing and logging
-        - Debugging
-        
+        Roll back a batch of related transactions as a unit, in reverse order.
+
+        Implements ADR E2 (multi-resource transaction atomicity). Rather than
+        storing a group id (which would require extending Transaction/
+        TransactionRecord and both RollbackStorage backends), the caller
+        supplies the transaction_ids it already collected while performing
+        the batch — e.g. one document creation per loop iteration.
+
         Args:
-            transaction_id: Transaction ID to retrieve
-            
+            transaction_ids: IDs in original creation order. Rolled back in
+                             reverse, since undoing must unwind a batch in
+                             the opposite order it was built (e.g. don't try
+                             to update a document a later step deleted).
+
         Returns:
-            Transaction object if found, None otherwise
+            Dict with "success" (True only if every rollback succeeded),
+            "rolled_back" (results for transactions undone so far), and
+            "failed" (the result that stopped the rollback, if any). Stops
+            at the first failure rather than continuing silently past it —
+            a partially-rolled-back batch needs a human to look at it, not
+            a best-effort sweep that hides which pieces didn't undo cleanly.
         """
-        return self.transactions.get(transaction_id)
-    
+        rolled_back = []
+
+        for transaction_id in reversed(transaction_ids):
+            result = self.rollback(transaction_id)
+            if not result.get("success"):
+                return {
+                    "success": False,
+                    "rolled_back": rolled_back,
+                    "failed": result
+                }
+            rolled_back.append(result)
+
+        return {
+            "success": True,
+            "rolled_back": rolled_back,
+            "failed": None
+        }
+
+    def get_transaction(self, transaction_id: str) -> Optional[Transaction]:
+        """Get transaction by ID."""
+        return self.storage.get(transaction_id)
+
     def list_transactions(
         self,
         client_id: Optional[str] = None,
@@ -198,60 +301,31 @@ class RollbackManager:
     ) -> List[Transaction]:
         """
         List transactions with optional filters.
-        
-        Implements "Audit and Version Control" from Section 1 - keeping detailed logs
-        of all changes for auditability and debugging.
-        
-        Args:
-            client_id: Optional filter by client ID (for multi-tenant scenarios)
-            action_type: Optional filter by action type (write, delete, update)
-            
-        Returns:
-            List of transactions, sorted by timestamp (newest first)
-            
+
         Reference: requirement doc - Section 1: "Audit and Version Control"
         """
-        transactions = list(self.transactions.values())
-        
-        if client_id:
-            transactions = [t for t in transactions if t.client_id == client_id]
-        
-        if action_type:
-            transactions = [t for t in transactions if t.action_type == action_type]
-        
-        return sorted(transactions, key=lambda x: x.timestamp, reverse=True)
+        return self.storage.list(client_id=client_id, action_type=action_type)
 
 
 class RollbackAPI:
     """
     API layer for rollback operations.
-    
+
     This class provides the high-level API interface for rollback operations,
     implementing the "Design a Rollback API Endpoint" requirement from Section 1.
-    
-    It wraps the RollbackManager and provides convenient methods for:
-    - Executing actions with automatic rollback tracking
-    - Rolling back transactions via API calls
-    
-    The execute_with_rollback method implements the workflow described in Section 1:
-    1. Before executing destructive API call, save current state (snapshot)
-    2. Perform the action
-    3. Record transaction with before/after states
-    4. Return transaction ID for potential rollback
-    
+
     Reference: requirement doc - Section 1: "Design a Rollback API Endpoint"
-    Reference: requirement doc - Section 1: "Example Workflow"
     """
-    
+
     def __init__(self, rollback_manager: RollbackManager):
         """
         Initialize rollback API.
-        
+
         Args:
             rollback_manager: RollbackManager instance to use for transaction management
         """
         self.rollback_manager = rollback_manager
-    
+
     def execute_with_rollback(
         self,
         action_type: str,
@@ -264,52 +338,34 @@ class RollbackAPI:
     ) -> Dict[str, Any]:
         """
         Execute an action with automatic rollback tracking.
-        
-        This method implements the complete workflow from Section 1:
-        
+
         Example Workflow (from Section 1):
         1. Before executing a destructive API call, save the current state or data snapshot
         2. Perform the action
         3. If a user or system detects an error or mistake, trigger a rollback
            by invoking the undo script or restoring the snapshot
         4. Confirm the system returns to the prior, consistent state
-        
-        This method handles steps 1-2. Step 3 is handled by rollback_transaction().
-        
+
         Args:
             action_type: Type of action (write, delete, update)
             resource_id: Resource ID being modified
             resource_type: Type of resource (document, form, etc.)
             action_func: Function to execute the actual action
-                        This should be a callable that performs the destructive operation
             get_state_func: Function to get current state of a resource
-                           Used to capture before/after snapshots
-            update_state_func: Function to update resource state
-                              Used by rollback to restore previous state
+            update_state_func: Function to update resource state (used by rollback to restore)
             client_id: Optional client ID for multi-tenant scenarios
-            
+
         Returns:
-            Dict containing:
-            - success: Whether action executed successfully
-            - result: Result from action_func
-            - transaction_id: Unique ID for this transaction (for rollback)
-            - error: Error message if action failed
-        
+            Dict containing success, result, transaction_id, or an error message.
+
         Reference: requirement doc - Section 1: "Example Workflow"
-        Reference: requirement doc - Section 1: "Use a Versioning Approach"
         """
-        # Step 1: Get previous state (snapshot before action)
-        # This implements "Maintain a Snapshot or Backup" from Section 1
         previous_state = get_state_func(resource_id)
-        
-        # Step 2: Execute the action
+
         try:
             result = action_func()
-            # Capture new state after action
             new_state = get_state_func(resource_id)
-            
-            # Step 3: Create transaction record with before/after states
-            # This implements "Transaction Management with a Log" from Section 1
+
             transaction_id = self.rollback_manager.create_transaction(
                 action_type=action_type,
                 resource_id=resource_id,
@@ -318,41 +374,28 @@ class RollbackAPI:
                 new_state=new_state,
                 client_id=client_id
             )
-            
+
             return {
                 "success": True,
                 "result": result,
-                "transaction_id": transaction_id  # Return ID for potential rollback
+                "transaction_id": transaction_id
             }
         except Exception as e:
-            # If action fails, return error (no transaction created)
             return {
                 "success": False,
                 "error": str(e)
             }
-    
+
     def rollback_transaction(self, transaction_id: str) -> Dict[str, Any]:
         """
         Rollback a transaction via API.
-        
-        This implements the "User Invokes Rollback on Realizing a Mistake" scenario
-        from Section 1. When a user calls this method (or the corresponding API endpoint),
-        the system restores the previous state.
-        
-        The rollback process:
-        - Look up transaction by ID
-        - Retrieve previous state (snapshot)
-        - Restore resource to previous state
-        - Confirm success
-        
-        Args:
-            transaction_id: Transaction ID to rollback
-                          This is the ID returned from execute_with_rollback()
-            
-        Returns:
-            Rollback result with previous_state for restoration
-            
+
         Reference: requirement doc - Section 1: "User Invokes Rollback on Realizing a Mistake"
-        Reference: requirement doc - Section 1: "API Executes Undo Logic Internally"
         """
         return self.rollback_manager.rollback(transaction_id)
+
+    def rollback_group(self, transaction_ids: List[str]) -> Dict[str, Any]:
+        """
+        Rollback a batch of related transactions as a unit. See ADR E2.
+        """
+        return self.rollback_manager.rollback_group(transaction_ids)

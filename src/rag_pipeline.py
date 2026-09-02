@@ -36,7 +36,6 @@ import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
 from openai import OpenAI
 from src.config import settings
 from src.models import DocumentChunk, RetrievalResult

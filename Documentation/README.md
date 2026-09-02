@@ -8,6 +8,7 @@ This directory contains all documentation for the Medical Documentation Agents p
 - **QUICKSTART.md** - Quick start guide
 - **SETUP.md** - Detailed setup instructions
 - **CODE_DOCUMENTATION.md** - Code documentation guide
+- **ARCHITECTURE_DECISIONS.md** - Living log of architectural decisions needed for the re-architecture
 - **DOCUMENTATION_COMPLETE.md** - Documentation status
 
 ## Source Documents
@@ -30,3 +31,4 @@ See [CODE_DOCUMENTATION.md](CODE_DOCUMENTATION.md) for details on how code maps 
 
 - [Quick Start Guide](QUICKSTART.md)
 - [Setup Instructions](SETUP.md)
+- [Architecture Decision Log](ARCHITECTURE_DECISIONS.md)

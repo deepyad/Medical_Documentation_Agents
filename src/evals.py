@@ -21,14 +21,19 @@ Implementation Strategy:
 
 Reference: requirement doc - Section 2: Evals
 """
+import json
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from langsmith import Client, traceable
 from langsmith.evaluation import evaluate, LangChainStringEvaluator
 from langsmith.schemas import Example, Run
 from src.agent import MedicalDocumentationAgent
-from src.mock_api import MockAPI
-from src.models import AgentState
-import json
+from src import tool_impl
+
+# Hand-authored fixture used to seed MockAPI for eval runs — see ADR F6.
+# No real-production-snapshot pipeline exists yet (ADR F1), so this is
+# checked into the repo instead of generated.
+_SNAPSHOT_PATH = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "eval_snapshot.json"
 
 
 class AgentEvaluator:
@@ -52,42 +57,65 @@ class AgentEvaluator:
     def __init__(self, client: Optional[Client] = None):
         """
         Initialize evaluator.
-        
-        Sets up LangSmith client and MockAPI for safe evaluation runs.
-        
+
+        Sets up the LangSmith client for dataset management, tracing, and
+        evaluation. Each eval run builds its own agent (and therefore its own
+        MockAPI) in evaluate_agent() — see ADR F3 on why an evaluator-owned
+        MockAPI here would be the wrong instance to inspect.
+
         Args:
             client: Optional LangSmith client (creates new one if not provided)
-                   This client is used for dataset management, tracing, and evaluation
         """
         self.client = client or Client()
-        self.mock_api = MockAPI()
-    
+
+    @staticmethod
+    def _load_snapshot() -> Dict[str, Any]:
+        """
+        Load the hand-authored fixture snapshot used to seed MockAPI for eval runs.
+
+        Implements ADR F6: without this, every eval run started from a
+        completely empty MockDatabase, so update_document/update_form_answer
+        paths were never meaningfully exercised — only create_document was.
+        Returns {} (no seeding) if the fixture file is missing.
+        """
+        if not _SNAPSHOT_PATH.exists():
+            return {}
+        with open(_SNAPSHOT_PATH) as f:
+            return json.load(f)
+
     @traceable(name="medical_documentation_agent_run")
     def evaluate_agent(
         self,
         task_description: str,
         device_info: Optional[Dict[str, Any]] = None,
         client_id: Optional[str] = None
-    ) -> AgentState:
+    ) -> Dict[str, Any]:
         """
         Run agent with tracing for evaluation.
-        
+
         This method implements the "Agent Configuration Switch" from Section 2.
         The agent is configured to use the mock API, ensuring all operations are
         isolated from production data.
-        
+
         The @traceable decorator ensures all agent operations are traced in LangSmith
         for comprehensive analysis and debugging.
-        
+
         Args:
             task_description: Task description for the agent
             device_info: Optional device information (name, type, class, etc.)
             client_id: Optional client ID for client-specific operations
-            
+
         Returns:
-            AgentState: Final state of the agent after completing the task
-                       This includes todos, documents, transactions, etc.
-        
+            Dict with "state" (final agent state: todos, documents,
+            transactions, tool_errors — see ADR F3) and "api_class" (the
+            class name of whatever tool_impl was actually configured to
+            write to during this run, captured immediately after the run
+            completes — used by safety_evaluator, see ADR F4). Note:
+            tool_impl._active_api is process-global mutable state (ADR E5's
+            accepted limitation), so under run_evaluation()'s
+            max_concurrency=2 this snapshot isn't a hard per-run guarantee —
+            it's still strictly more signal than the previous hardcoded 1.0.
+
         Reference: requirement doc - Section 2: "Agent Configuration Switch: Design the agent
                    or its orchestration framework to switch target endpoints (production API
                    or mock API) based on the mode: evaluation/testing vs live execution"
@@ -95,26 +123,31 @@ class AgentEvaluator:
                    to target the mock API endpoint"
         """
         # Use mock API for evals - this ensures no production data is affected
-        # This implements "Agent Configuration Switch" from Section 2
-        agent = MedicalDocumentationAgent(use_mock_api=True)
-        
-        # Optionally load snapshot data for more realistic evaluation
-        # snapshot_data = self._load_snapshot()
-        # agent.mock_api = MockAPI(snapshot_data=snapshot_data)
-        
-        # Run agent - all operations will use mock API
+        # This implements "Agent Configuration Switch" from Section 2.
+        # Seeded from a checked-in fixture (ADR F6) rather than starting from
+        # a completely empty mock database.
+        agent = MedicalDocumentationAgent(
+            use_mock_api=True,
+            mock_snapshot_data=self._load_snapshot()
+        )
+
+        # Run agent - all operations will use this run's own mock API instance
         # The @traceable decorator ensures all operations are logged to LangSmith
         state = agent.run(
             task_description=task_description,
             device_info=device_info,
             client_id=client_id
         )
-        
+
+        # Capture what the tools were actually configured to write to for this
+        # run, before resetting — safety_evaluator checks this. See ADR F4.
+        api_class = type(tool_impl._active_api).__name__
+
         # Reset mock API after run to ensure clean state for next evaluation
         # This implements "Reset Capability" from Section 2
         agent.mock_api.reset_database()
-        
-        return state
+
+        return {"state": state, "api_class": api_class}
     
     def completeness_evaluator(self, run: Run, example: Example) -> Dict[str, Any]:
         """
@@ -142,100 +175,125 @@ class AgentEvaluator:
         """
         output = run.outputs or {}
         state = output.get("state")
-        
+
         if not state:
-            return {"key": "completeness", "score": 0.0}
-        
+            return {"key": "completeness", "score": 0.0, "comment": "No state in run outputs"}
+
         # Check if all todos are completed
         # This validates that the agent completed all planned tasks
         todos = state.get("todos", [])
         completed = sum(1 for todo in todos if todo.get("status") == "completed")
         total = len(todos)
-        
+
         score = completed / total if total > 0 else 0.0
-        
+        comment = f"Completed {completed}/{total} tasks"
+
+        # Diff against the dataset's expected outcome (previously defined but
+        # never actually read — see ADR F3) so this scores a real regression
+        # signal, not just "did the run complete its own self-reported plan."
+        expected = (example.outputs or {}).get("expected_todos_completed")
+        if expected is not None:
+            score = min(score, 1.0) if completed >= expected else completed / expected
+            comment += f" (expected >= {expected})"
+
         return {
             "key": "completeness",
             "score": score,
-            "comment": f"Completed {completed}/{total} tasks"
+            "comment": comment
         }
     
     def correctness_evaluator(self, run: Run, example: Example) -> Dict[str, Any]:
         """
         Evaluate correctness of agent actions.
-        
-        This evaluator checks the transaction log for errors. An agent should not
-        produce errors in its operations. If errors are found, it indicates the agent
-        may have made mistakes or encountered issues.
-        
+
+        This evaluator checks the run's own tool_errors (populated by
+        MedicalDocumentationAgent from AgentExecutor's intermediate steps —
+        see ADR F3) for failed tool calls. An agent should not produce
+        failures in its tool operations; if any are found, it indicates the
+        agent made a mistake or hit an error it didn't recover from.
+
+        Previously this checked self.mock_api.get_transaction_log() — the
+        evaluator's own MockAPI instance, never touched by the actual eval
+        run (each run builds its own agent, with its own MockAPI), and
+        MockDatabase's transaction log never contained an "error" key in the
+        first place. Both bugs meant this always scored 1.0 regardless of
+        real behavior. Reading tool_errors from the per-run state fixes both.
+
         This is part of the "Automated Validation" from Section 2 - ensuring agent
         actions are correct and don't produce errors.
-        
+
         Args:
             run: LangSmith run object
             example: Example object with expected outputs
-            
+
         Returns:
             Dict with:
             - key: "correctness"
-            - score: 1.0 if no errors, 0.0 if errors found
-            - comment: Description of errors found (if any)
-        
+            - score: 1.0 if no tool failures, 0.0 if any were found
+            - comment: Description of failures found (if any)
+
         Reference: requirement doc - Section 2: "Automated Validation"
         """
         output = run.outputs or {}
-        state = output.get("state")
-        
-        # Check transaction log for errors
-        # The mock API maintains a transaction log that can be analyzed
-        transaction_log = self.mock_api.get_transaction_log()
-        errors = [t for t in transaction_log if "error" in t]
-        
-        if errors:
+        state = output.get("state") or {}
+        tool_errors = state.get("tool_errors", [])
+
+        if tool_errors:
             return {
                 "key": "correctness",
                 "score": 0.0,
-                "comment": f"Found {len(errors)} errors in transactions"
+                "comment": f"Found {len(tool_errors)} tool call failure(s): {tool_errors[:3]}"
             }
-        
+
         return {
             "key": "correctness",
             "score": 1.0,
-            "comment": "No errors in transactions"
+            "comment": "No tool call failures"
         }
     
     def safety_evaluator(self, run: Run, example: Example) -> Dict[str, Any]:
         """
         Evaluate safety - ensure no production data was modified.
-        
+
         This is the most critical evaluator - it ensures that the eval run did not
-        affect production data. Since we use MockAPI, this should always pass, but
-        it's important to verify.
-        
+        affect production data. Previously this unconditionally returned 1.0
+        without checking anything — now it checks the api_class evaluate_agent
+        actually captured for this run (see ADR F4): an eval run that somehow
+        ended up configured against PostgresAPI instead of MockAPI (e.g. a bug
+        in the mode-wiring from ADR E5) is exactly the failure this evaluator
+        exists to catch.
+
         This implements the core safety requirement from Section 2: "This approach
         ensures full agent autonomy during eval without risking production database integrity."
-        
+
         Args:
             run: LangSmith run object
             example: Example object with expected outputs
-            
+
         Returns:
             Dict with:
             - key: "safety"
-            - score: 1.0 if safe (mock API used), 0.0 otherwise
+            - score: 1.0 if MockAPI was used, 0.0 otherwise
             - comment: Safety status description
-        
+
         Reference: requirement doc - Section 2: "This approach ensures full agent autonomy
                    during eval without risking production database integrity"
         Reference: requirement doc - Section 2: "Safety Guarantee: Ensure no production data modification"
         """
-        # Mock API should be isolated - check that it was reset
-        # This is a simplified check - in production, you might want more sophisticated
-        # verification that production data was not accessed
+        output = run.outputs or {}
+        api_class = output.get("api_class")
+
+        if api_class != "MockAPI":
+            return {
+                "key": "safety",
+                "score": 0.0,
+                "comment": f"Expected MockAPI, but tools were configured against {api_class!r}"
+            }
+
         return {
             "key": "safety",
             "score": 1.0,
-            "comment": "Mock API used - no production data affected"
+            "comment": "Confirmed MockAPI was used for this run — no production data affected"
         }
     
     def create_eval_dataset(self) -> List[Example]:
