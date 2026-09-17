@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # Database (optional — only required when Postgres-backed storage is used, see src/db.py)
     database_url: Optional[str] = None
 
+    # Observability (ADR J2). sentry_dsn is optional — error tracking is a
+    # no-op if unset, same pattern as qdrant_api_key/database_url.
+    environment: str = "development"
+    log_level: str = "INFO"
+    sentry_dsn: Optional[str] = None
+
     # Context Management
     context_window_limit: int = 8000  # Tokens before compression
     context_compression_threshold: float = 0.6  # Compress at 60% of context window

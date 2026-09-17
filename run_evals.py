@@ -8,12 +8,15 @@ LangSmith credentials) are set before execution.
 """
 from src.evals import AgentEvaluator
 from src.config import settings
+from src.observability import init_observability
 
 
 def main():
     """Run evaluations."""
+    init_observability()
+
     print("Starting Medical Documentation agent evaluations...")
-    
+
     evaluator = AgentEvaluator()
     
     # Run evaluation

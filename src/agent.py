@@ -42,6 +42,9 @@ from src.mock_api import MockAPI
 from src.postgres_api import PostgresAPI
 from src.rollback import RollbackManager, InMemoryRollbackStorage, PostgresRollbackStorage
 from src import tool_impl
+from src.observability import get_logger
+
+logger = get_logger(__name__)
 
 
 class MedicalDocumentationAgent:
@@ -178,7 +181,19 @@ When creating documents, ensure they are comprehensive and based on retrieved in
                     "result": observation
                 })
         return errors
-    
+
+    @staticmethod
+    def _log_tool_errors(phase: str, new_errors: List[Dict[str, Any]]) -> None:
+        """Log any newly-found tool failures (from _extract_tool_errors). See ADR J2."""
+        for error in new_errors:
+            logger.warning(
+                "tool_call_failed",
+                phase=phase,
+                tool=error.get("tool"),
+                tool_input=error.get("tool_input"),
+                result=error.get("result"),
+            )
+
     def _build_workflow(self) -> StateGraph:
         """Build LangGraph workflow."""
         workflow = StateGraph(AgentState)
@@ -235,7 +250,9 @@ When creating documents, ensure they are comprehensive and based on retrieved in
         if state.todos:
             # Already planned
             return {}
-        
+
+        logger.info("phase_start", phase="plan", client_id=state.client_id)
+
         planning_prompt = f"""Based on this task: {state.task_description}
 
 Create a detailed todo list for creating all required documents. Break down the work into:
@@ -260,6 +277,8 @@ Create a detailed todo list for creating all required documents. Break down the 
             )
             for i, item in enumerate(plan.todos)
         ]
+
+        logger.info("plan_created", todo_count=len(todos), client_id=state.client_id)
 
         return {"todos": todos}
     
@@ -286,10 +305,12 @@ Create a detailed todo list for creating all required documents. Break down the 
             return {}
         
         current_todo = research_todos[0]
-        
+
+        logger.info("phase_start", phase="research", todo_id=current_todo.id, client_id=state.client_id)
+
         # Retrieve relevant knowledge
         query = f"{state.task_description} {current_todo.description}"
-        
+
         # Use agent executor to perform research
         research_input = f"""Research information for: {current_todo.description}
         
@@ -317,13 +338,16 @@ Use the available tools to:
             relevance=1.0
         )
 
+        new_errors = self._extract_tool_errors(result)
+        self._log_tool_errors("research", new_errors)
+
         return {
             "todos": state.todos,
             "messages": state.messages + [
                 {"role": "user", "content": research_input},
                 {"role": "assistant", "content": result.get("output", "")}
             ],
-            "tool_errors": state.tool_errors + self._extract_tool_errors(result)
+            "tool_errors": state.tool_errors + new_errors
         }
     
     def _create_documents_phase(self, state: AgentState) -> Dict[str, Any]:
@@ -338,7 +362,9 @@ Use the available tools to:
             return {}
         
         current_todo = doc_todos[0]
-        
+
+        logger.info("phase_start", phase="create_documents", todo_id=current_todo.id, client_id=state.client_id)
+
         # Get context
         context = self.context_manager.get_context_string(
             max_tokens=2000,
@@ -361,36 +387,44 @@ Use the create_document tool to create the document with all relevant informatio
         current_todo.status = TaskStatus.COMPLETED
         current_todo.result = result
 
+        new_errors = self._extract_tool_errors(result)
+        self._log_tool_errors("create_documents", new_errors)
+
         return {
             "todos": state.todos,
             "messages": state.messages + [
                 {"role": "user", "content": creation_input},
                 {"role": "assistant", "content": result.get("output", "")}
             ],
-            "tool_errors": state.tool_errors + self._extract_tool_errors(result)
+            "tool_errors": state.tool_errors + new_errors
         }
     
     def _review_phase(self, state: AgentState) -> Dict[str, Any]:
         """Review phase."""
+        logger.info("phase_start", phase="review", client_id=state.client_id)
+
         review_prompt = """Review all created documents and determine if any revisions are needed.
-        
+
 Check for:
 - Completeness
 - Accuracy
 - Consistency
 - Regulatory compliance"""
-        
+
         result = self.agent_executor.invoke({
             "input": review_prompt,
             "chat_history": state.messages
         })
+
+        new_errors = self._extract_tool_errors(result)
+        self._log_tool_errors("review", new_errors)
 
         return {
             "messages": state.messages + [
                 {"role": "user", "content": review_prompt},
                 {"role": "assistant", "content": result.get("output", "")}
             ],
-            "tool_errors": state.tool_errors + self._extract_tool_errors(result)
+            "tool_errors": state.tool_errors + new_errors
         }
     
     def _compress_context_node(self, state: AgentState) -> Dict[str, Any]:
@@ -463,9 +497,20 @@ Check for:
             device_info=device_info,
             client_id=client_id
         )
-        
+
+        logger.info("agent_run_start", client_id=client_id, use_mock_api=self.use_mock_api)
+
         # Run workflow
         final_state = self.workflow.invoke(initial_state)
-        
+
+        # final_state comes back dict-like from LangGraph (not a reconstructed
+        # AgentState instance), same as src/evals.py already assumes.
+        logger.info(
+            "agent_run_complete",
+            client_id=client_id,
+            todo_count=len(final_state.get("todos", [])),
+            tool_error_count=len(final_state.get("tool_errors", [])),
+        )
+
         return final_state
 

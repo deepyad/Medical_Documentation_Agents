@@ -23,6 +23,9 @@ from typing import Any, Dict, List, Optional
 from mcp.server.fastmcp import FastMCP
 
 from src import tool_impl
+from src.observability import get_logger, init_observability
+
+logger = get_logger(__name__)
 
 mcp_app = FastMCP("medical-documentation-agents")
 
@@ -40,6 +43,11 @@ def _configure_storage_mode() -> None:
         pass  # tool_impl already defaults to MockAPI + InMemoryRollbackStorage
     else:
         raise ValueError(f"Unknown MCP_SERVER_MODE: {mode!r} (expected 'eval' or 'production')")
+
+    # Worth logging unconditionally: this is exactly the mode-wiring bug class
+    # F4's safety_evaluator was built to catch, and this server has no
+    # evaluator watching it. See ADR B4/E5/J2.
+    logger.info("mcp_server_mode_configured", mode=mode)
 
 
 @mcp_app.tool()
@@ -100,5 +108,6 @@ def rollback_transaction(transaction_id: str) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
+    init_observability()
     _configure_storage_mode()
     mcp_app.run(transport="stdio")

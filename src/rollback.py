@@ -28,7 +28,12 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import uuid
 
+import sentry_sdk
+
 from src.models import Transaction, TaskStatus
+from src.observability import get_logger
+
+logger = get_logger(__name__)
 
 
 class RollbackStorage(ABC):
@@ -381,6 +386,20 @@ class RollbackAPI:
                 "transaction_id": transaction_id
             }
         except Exception as e:
+            # This is the only place this exception is ever seen — it's
+            # converted to a return value below, not re-raised — so this is
+            # also the only chance to log/track it. See ADR J2.
+            logger.error(
+                "rollback_action_failed",
+                action_type=action_type,
+                resource_id=resource_id,
+                resource_type=resource_type,
+                client_id=client_id,
+                error=str(e),
+                exc_info=True,
+            )
+            sentry_sdk.capture_exception(e)
+
             return {
                 "success": False,
                 "error": str(e)

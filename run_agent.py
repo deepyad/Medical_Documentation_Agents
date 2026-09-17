@@ -6,13 +6,15 @@ device payload so you can run it without providing any input. Modify the
 `task_description` and `device_info` blocks—or extend the script with CLI
 arguments—if you need to exercise different scenarios.
 """
-import asyncio
 from src.agent import MedicalDocumentationAgent
 from src.config import settings
+from src.observability import init_observability
 
 
 def main():
     """Run the agent with a sample task."""
+    init_observability()
+
     agent = MedicalDocumentationAgent(use_mock_api=False)  # Set to True for evals
     
     task_description = """

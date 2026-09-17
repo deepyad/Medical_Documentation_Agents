@@ -2,11 +2,15 @@
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
+import sentry_sdk
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from src.config import settings
+from src.observability import get_logger
+
+logger = get_logger(__name__)
 
 Base = declarative_base()
 
@@ -47,7 +51,11 @@ def get_session() -> Iterator[Session]:
     try:
         yield session
         session.commit()
-    except Exception:
+    except Exception as e:
+        # Re-raised below — logged/tracked here so the failure is visible
+        # even though the caller may catch and handle it further up. See ADR J2.
+        logger.error("db_session_failed", error=str(e), exc_info=True)
+        sentry_sdk.capture_exception(e)
         session.rollback()
         raise
     finally:

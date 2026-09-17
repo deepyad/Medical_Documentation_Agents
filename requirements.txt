@@ -35,4 +35,8 @@ tiktoken>=0.5.0
 # Model Context Protocol (MCP) - stdio server exposing agent tools (src/mcp_server.py)
 mcp>=1.2.0
 
+# Observability (structured logging + error tracking) - see src/observability.py, ADR J2
+structlog>=24.1.0
+sentry-sdk>=1.40.0
+
 

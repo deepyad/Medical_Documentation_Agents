@@ -12,17 +12,43 @@ This document tracks the architectural decisions needed to take Medical Document
 
 ---
 
+## Implementation Order
+
+This is a navigational index, not a restructuring — the lettered sections (A–K) below keep their stable IDs and cross-references (e.g. "ties to C3") exactly as they are. This section just orders the *not-yet-implemented* decided items by dependency and effort, easiest/most independent first, so they can be picked up one at a time.
+
+**Already implemented** (context, not part of the sequence below): B1 (partial), B3, B4 (unverified — needs a real vector DB to test), E2, F2, F3, F4, F6, G1, I1 (partial), K1 (partial), K3.
+
+**Blocked — not implementable yet:** I2 (compliance posture) has no decision to implement.
+
+**Ongoing housekeeping, not a discrete step:** A1 — docstring cleanup happens gradually as files are next touched for other reasons, not as its own task.
+
+| Order | ID | Decision | Why here |
+|---|---|---|---|
+| ~~1~~ | ~~J2~~ | ~~Observability (structured logging + error tracker)~~ | **Done** (2026-09-17). |
+| 2 | E6 | Docker-compose for Postgres | Config/Dockerfile only, no code changes to `src/`. Unlocks actually verifying E1/E3/E4/E5, which have been sitting unverified. |
+| 3 | I3 | Multi-tenancy enforcement (`client_id` required) | Self-contained signature changes (`tool_impl.py`, `rollback.py`, `knowledge_retrieval.py`, tool/MCP schemas) plus test updates — moderate size but no external dependency. |
+| 4 | B2 | Modernize `AgentExecutor` | Touches the same `agent.py` code F3 just stabilized (`return_intermediate_steps`, `_extract_tool_errors`) — doable now, but do it carefully so F3's fix doesn't regress. |
+| 5 | E1 / E3 / E4 / E5 | Verify the drafted Postgres code | Not new code — run E6's compose, `alembic upgrade head`, smoke-test `PostgresAPI`/`PostgresRollbackStorage`/`rollback_group` against a real database. Closes the loop on work already written. |
+| 6 | C1 | Vector DB → Weaviate Cloud | Real vendor migration (`rag_pipeline.py` + `knowledge_retrieval.py`), needs a Weaviate Cloud account. Bigger, but nothing blocks starting it. |
+| 7 | C2 | Embedding model upgrade | Bundled into C1's same re-index pass — do together, not as a separate migration. |
+| 8 | C3 | openFDA ingestion pipeline | New build (fetch → chunk → embed → index). Needs C1 done first — indexing needs a target. |
+| 9 | C4 | Hybrid retrieval tuning | Needs C3's real data and a labeled eval set to tune against — can't happen before C3. |
+| 10 | D1 | Knowledge conflict resolution workflow | Needs a design decision first (who reviews, what surfaces a conflict) — not ready to code until that's settled. |
+| 11 | J1 | AWS deployment | Biggest remaining piece — Dockerfile, RDS, deployment config. Depends on E1/E3 actually being verified (step 5) and E6 (step 2) as groundwork. |
+
+---
+
 ## A. Foundations
 
 ### A1. Source of truth for requirements
-**Status:** Open
+**Status:** Decided — POC outline is source of truth
 **Context:** Nearly every docstring in `src/` cites a "requirement doc," `Architecture.pdf`, and `extracted_text.txt` as the specification these modules implement (see e.g. `src/agent.py:29`, `src/rollback.py:22`, `src/knowledge_retrieval.py:24`). None of these three files exist in this repository. The closest surviving artifact is `Documentation/Medical_Documentation_Agentic_POC_Outline.md`, which summarizes the same five capability areas but is a summary, not the original spec.
 **Options:**
 1. Locate and add the original requirement doc/Architecture.pdf to the repo (e.g. under `Documentation/source/`).
 2. Treat the POC outline as the new source of truth going forward and stop citing the missing doc.
 3. Write a fresh versioned spec now, before institutional knowledge of the original requirements decays further.
 **Recommendation:** Do (2) immediately as a stopgap, and pursue (3) alongside this re-architecture — capture what's actually being built as we decide it, rather than continuing to point at a document nobody in the repo can read.
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Adopting (2): `Documentation/Medical_Documentation_Agentic_POC_Outline.md` is the source of truth going forward; stop citing the missing "requirement doc." No code change today — the dozens of "Reference: requirement doc - Section X" docstring citations across `src/` get cleaned up gradually (e.g. as each file is next touched for another reason) rather than in one mechanical sweep.
 
 ---
 
@@ -39,14 +65,14 @@ This document tracks the architectural decisions needed to take Medical Document
 **Decision:** 2026-08-16 — Implemented the config-driven half of option (1): added `openai_model` to `src/config.py` (default `"gpt-4-turbo-preview"`, override via `OPENAI_MODEL` env var), `src/agent.py` now reads `settings.openai_model` instead of a hardcoded string. Deliberately did **not** implement the other half of option (1) ("update to a current-generation model") — I don't have reliable, verifiable knowledge of what OpenAI model is actually current/available right now, and guessing a model ID risks silently breaking the agent with a nonexistent model. Left the existing value as the default; you can override via `.env` (`OPENAI_MODEL=...`) with whatever model you've confirmed is right. Options (2) (provider abstraction) and (3) (standardize on Claude) remain open — no business driver yet, per the original recommendation.
 
 ### B2. Agent orchestration framework
-**Status:** Open
+**Status:** Decided — modernize (not yet implemented)
 **Context:** The workflow is built on LangGraph's `StateGraph` (`src/agent.py:133-173`) wrapping a LangChain `AgentExecutor` (`create_openai_tools_agent`, itself a legacy LangChain pattern that predates LangChain's newer tool-calling APIs).
 **Options:**
 1. Keep LangGraph for the phase graph, but replace `AgentExecutor`/`create_openai_tools_agent` with a more current tool-calling loop.
 2. Replace LangGraph entirely with a custom or different orchestration layer.
 3. Keep as-is.
 **Recommendation:** (1) — the LangGraph phase structure (plan → research → create → review) fits the problem well; the legacy `AgentExecutor` wrapper is the part worth modernizing.
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Adopting (1): keep LangGraph, modernize `AgentExecutor`/`create_openai_tools_agent` to a current tool-calling loop. Direction decided, not implemented today — planned as a dedicated follow-up task, since it touches the same code paths F3's `_extract_tool_errors`/`return_intermediate_steps` wiring just stabilized (`src/agent.py`), and should be done carefully rather than folded into this decision-logging pass.
 
 ### B3. Planning-phase output parsing
 **Status:** Decided — implemented
@@ -59,69 +85,75 @@ This document tracks the architectural decisions needed to take Medical Document
 **Decision:** 2026-08-16 — Implemented option (1). Added `PlannedTodo`/`PlanOutput` schemas (`src/models.py`), bound via `self.planning_llm = self.llm.with_structured_output(PlanOutput)` in `MedicalDocumentationAgent.__init__`. `_plan_phase` now calls `self.planning_llm.invoke(...)` directly — no `json.loads`, no try/except, no hardcoded fallback plan. A genuine LLM/API failure now propagates as a real exception instead of being silently replaced by a fake plan.
 
 ### B4. Tool invocation architecture — direct calls vs. MCP
-**Status:** Open
-**Context:** `src/tools.py` defines 6 LangChain `@tool`-decorated functions, bound directly into `create_openai_tools_agent`/`AgentExecutor` in `src/agent.py:120-131`. This is in-process Python function calling: the LLM emits an OpenAI-format tool-call, LangChain looks up the matching Python function by name and calls it directly in the same process — no MCP involved. `mcp>=0.1.0` is listed in `requirements.txt:31` but nothing in `src/` actually uses it.
+**Status:** Decided — implemented (drafted, unverified — see caveat below)
+**Context:** `src/tools.py` (pre-change) defined 6 LangChain `@tool`-decorated functions, bound directly into `create_openai_tools_agent`/`AgentExecutor`. This was in-process Python function calling only — no MCP involved, despite `mcp` being listed in `requirements.txt` unused.
 **Options:**
 1. Keep direct in-process tool calling (current) — simplest, fastest, single deployable, easiest to test; tools are only reachable by this one agent process.
 2. Expose tools via one or more MCP servers, with the agent acting as an MCP client — decouples tool implementations from the agent, makes them reusable by other agents/clients (including Claude Desktop or other MCP-compatible tools), and gives a natural seam for H1's deferred service-layer question. Costs: separate server process(es) to run and secure, a transport/auth layer, added latency, more moving parts to operate and debug.
 3. Hybrid — keep in-process calling for now; revisit MCP if/when tools need to be shared across more than one agent or exposed to external consumers.
-**Recommendation:** (3) — MCP earns its complexity when tools need to be reused outside this one agent (e.g. a separate client-facing service also needing `search_similar_devices`, or wanting other MCP clients to call these tools directly). That consumer doesn't exist yet, so adopting MCP now would be building for a need that hasn't materialized. Worth noting: MCP is provider-agnostic (it's not "an OpenAI thing") — it works with any MCP-compatible client regardless of which LLM is behind it. `create_openai_tools_agent`'s OpenAI-formatted tool-calling is a separate, unrelated layer (how the LLM *requests* a tool call) from MCP (how a tool is *reached* once requested); adopting MCP wouldn't require dropping OpenAI, or vice versa. If MCP isn't adopted, the unused `mcp` dependency should be dropped from `requirements.txt` as part of K1-style cleanup.
-**Decision:** _(pending)_
+**Recommendation:** (3) — MCP earns its complexity when tools need to be reused outside this one agent. Worth noting: MCP is provider-agnostic — it works with any MCP-compatible client regardless of which LLM is behind it; adopting it wouldn't require dropping OpenAI's tool-calling format, since that's a separate layer (how the LLM *requests* a call) from MCP (how a tool is *reached*).
+**Decision:** 2026-09-02 — Went beyond (3), during a follow-up discussion where the user's stated motivation was concrete reuse (e.g. Claude Desktop), not speculative: built a minimal **stdio MCP server as a low-cost hedge**, exposing all 6 tools:
+- `src/tool_impl.py` — extracted the actual tool logic (previously inline in `src/tools.py`'s `@tool` functions) into plain functions, so there's one implementation shared by both interfaces.
+- `src/tools.py` — reduced to a thin LangChain adapter over `tool_impl`.
+- `src/mcp_server.py` — `FastMCP` stdio server registering all 6 tools as thin wrappers over the same `tool_impl` functions. Reads `MCP_SERVER_MODE` (default `"eval"` — isolated `MockAPI`, safe; `"production"` is explicit opt-in only) since this server is spawned independently of `MedicalDocumentationAgent` and has no auth layer of its own (I1/I3 still open) — see ADR E5 for the mode-wiring mechanism itself.
+- `requirements.txt` bumped `mcp` to a version that includes `mcp.server.fastmcp`.
+
+**Caveat — not run end-to-end.** Verified: all files compile, all 6 tools are registered, `MCP_SERVER_MODE` parsing is correct. Not verified: actually starting the server and listing tools via a real MCP client (e.g. the MCP Inspector), because `tool_impl.py` eagerly instantiates `HybridRetrieval()`/`KnowledgeRetrieval()` at import time, both of which connect to Qdrant in their constructors — so even `python -m src.mcp_server` can't be exercised without a running Qdrant instance, which isn't available in this environment. Treat this the same as E1/E3: code exists, direction is decided, runtime behavior is unverified.
 
 ---
 
 ## C. Data & Retrieval
 
 ### C1. Vector database choice
-**Status:** Open
+**Status:** Decided — switch to Weaviate Cloud (not yet implemented)
 **Context:** Qdrant is used throughout (`src/knowledge_retrieval.py`, `src/rag_pipeline.py`), currently pointed at `http://localhost:6333` by default (`src/config.py:22`) with no deployed instance.
 **Options:**
 1. Continue with Qdrant — self-hosted (Docker) for dev, Qdrant Cloud for production (already documented in `SETUP.md`).
 2. Move to a managed/embedded alternative (pgvector alongside the relational DB, Pinecone, Weaviate).
 **Recommendation:** (1) — Qdrant is already integrated in two modules and its multi-collection model maps well onto the global/client knowledge split (D1). Switching only pays off if there's a strong reason (e.g. wanting one database instead of two).
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Going with option (2), specifically **Weaviate Cloud** (managed) — driven by a preference for a managed service over self-hosting/operating Qdrant. This is a real vendor swap, not a config change: it touches both `HybridRetrieval` (`src/rag_pipeline.py`) and `KnowledgeRetrieval` (`src/knowledge_retrieval.py`), both currently built directly on `qdrant_client`. Note the sparse (BM25) half of hybrid retrieval is already handled in-process via `rank_bm25`, independent of the vector DB, so Weaviate's own hybrid-search features aren't a requirement — plain vector search is enough to keep the current architecture. **Not implemented today** — direction decided, actual migration (new `weaviate-client` dependency, rewriting the Qdrant-specific calls in both modules, updating `src/config.py`'s `qdrant_url`/`qdrant_api_key` settings, and `SETUP.md`'s local-Qdrant-via-Docker instructions) is a dedicated follow-up task, to be done together since both modules must move in the same change to avoid a broken in-between state.
 
 ### C2. Embedding model
-**Status:** Open
+**Status:** Decided — bundled with C1/C3 (not yet implemented)
 **Context:** `src/config.py:37` hardcodes `text-embedding-ada-002`, an older OpenAI embedding model that has been superseded by newer, cheaper, higher-quality embedding models.
 **Options:**
 1. Upgrade to a current-generation embedding model.
 2. Keep `ada-002` for continuity with any already-indexed vectors.
 **Recommendation:** (1), but note this is coupled to C1/C3 — any embedding model change requires re-indexing everything, so batch it with the real data ingestion work (C3) rather than doing it twice.
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Adopting (1), bundled with the C1 Weaviate migration and C3 ingestion — all three require a fresh indexing pass, so doing them together avoids re-indexing twice. Exact model left unspecified for now (same reasoning as B1: won't guess a specific model id without verifying it's current at implementation time). Not implemented today.
 
 ### C3. Real FDA 510(k) data ingestion
-**Status:** Open
+**Status:** Decided — openFDA API (not yet implemented)
 **Context:** `SemanticChunker`/`HybridRetrieval` (`src/rag_pipeline.py`) and `KnowledgeRetrieval` (`src/knowledge_retrieval.py`) implement real chunking/indexing/retrieval logic, but nothing in the repo actually ingests FDA 510(k) data into them. `SETUP.md` step 7 ("Initialize Data") shows the indexing calls as commented-out example code. The "300,000+ FDA documents" language in `Documentation/BUSINESS_PRESENTATION.md` is aspirational, not something this repo currently does.
 **Options:**
 1. Build an ingestion pipeline against the public openFDA 510(k) API/database.
 2. License or acquire a curated FDA regulatory dataset.
 3. Continue with manual/ad-hoc indexing per engagement.
 **Recommendation:** (1) as the default path — openFDA's 510(k) endpoint is public and sufficient to bootstrap a real corpus without a licensing decision blocking progress. This is likely the single highest-leverage gap to close, since nothing downstream (retrieval quality, evals, demos) is real without it.
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Adopting (1): build an ingestion pipeline against the public openFDA 510(k) API. Not implemented today — this is a real build (fetch, transform, chunk via `SemanticChunker`, embed, index into whatever C1 lands on i.e. Weaviate) and should land together with the C1/C2 migration work per C2's note above, not as three separate re-indexing passes.
 
 ### C4. Hybrid retrieval tuning methodology
-**Status:** Open
+**Status:** Decided — sequence after C3
 **Context:** Dense (Qdrant) + sparse (BM25) fusion weighting and an optional cross-encoder re-rank step are described in `Documentation/Medical_Documentation_Agentic_POC_Outline.md` section 3 and explicitly flagged there as unfinished "next iteration" work — no tuning process or benchmark exists yet.
 **Options:**
 1. Build an offline eval set (recall@k, precision@k, MRR on labeled device pairs, as the POC outline proposes) before tuning anything.
 2. Tune weights ad hoc against spot checks.
 **Recommendation:** (1) — this depends on C3 (real data) existing first; sequence it after ingestion, not before.
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Confirmed: adopting (1), sequenced strictly after C3. No change to the recommendation — logged as explicitly confirmed rather than left silently pending.
 
 ---
 
 ## D. Knowledge Layer
 
 ### D1. Global vs. client knowledge conflict resolution
-**Status:** Open
+**Status:** Decided — human-in-the-loop (not yet implemented)
 **Context:** `KnowledgeRetrieval` maintains separate `global_knowledge`/`client_knowledge` Qdrant collections (`src/knowledge_retrieval.py:79`) and the design supports detecting contradictory high-similarity facts, but there is no resolution workflow — conflicts can be flagged, not resolved. `Medical_Documentation_Agentic_POC_Outline.md` explicitly lists this as a next step.
 **Options:**
 1. Human-in-the-loop resolution (surface conflicts to a reviewer before they affect document generation).
 2. Automatic resolution by recency/confidence scoring alone.
 3. No resolution — leave both facts retrievable and let the generation prompt handle ambiguity.
 **Recommendation:** (1) for anything that could affect regulatory submission content — given the compliance stakes (I2), silent automatic resolution is the wrong default here even though it's the cheapest to build.
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Adopting (1): human-in-the-loop review for conflicts. Not implemented today — needs a real design (who reviews, what surfaces the conflict — a UI, a notification, a blocking step in the agent workflow) before it's buildable; that design work is a dedicated follow-up, not something to improvise today.
 
 ### D2. Fact-extraction pipeline
 **Status:** Open — recommendation adopted as decision (deferred, tracked explicitly)
@@ -166,27 +198,27 @@ This document tracks the architectural decisions needed to take Medical Document
 **Decision:** 2026-08-16 — Build `PostgresAPI` (drafted, unreviewed, in `src/postgres_api.py`) as a same-interface replacement for `MockAPI` in production mode.
 
 ### E4. Storage schema shape: JSON columns vs. normalized tables
-**Status:** Open
+**Status:** Decided — hybrid, matches draft
 **Context:** The paused draft (`src/db_models.py`) stores `previous_state`/`new_state` (transactions), `metadata` (documents/forms), and `answers` (forms) as Postgres `JSONB` columns rather than normalized relational columns/tables (e.g. a separate `form_answers` row per question).
 **Options:**
 1. Keep JSONB blobs — flexible, no migration needed when document/form shapes change, matches how `MockDatabase` already stores these as free-form dicts.
 2. Normalize into relational tables/columns — more queryable (can index/filter on individual fields, e.g. a specific form answer), but requires a settled schema and a migration for every shape change.
 3. Hybrid — structured columns for the fields that are stable (id, type, title, status, timestamps), JSONB for the parts still in flux (metadata, answers).
 **Recommendation:** (3) as drafted — the draft already does this for documents/forms (structured columns + a `metadata`/`answers` JSONB catch-all); full normalization is premature while document/form shapes aren't finalized (blocked on C3 — real FDA data hasn't been ingested yet, so the actual shape of a "document" in practice isn't known).
-**Decision:** _(pending — you flagged wanting to think through more decisions before implementation continues)_
+**Decision:** 2026-09-17 — Confirmed (3), matching the paused draft as-is. No further code change needed here specifically — this is one of the things that becomes testable once E1/E3's drafted Postgres code actually gets run against a live database.
 
 ### E5. Mode-based storage wiring (eval vs. production)
-**Status:** Open
+**Status:** Decided — implemented (unverified)
 **Context:** The paused draft routes eval mode to `MockAPI` + `InMemoryRollbackStorage` (ephemeral, resettable) and production mode to `PostgresAPI` + `PostgresRollbackStorage` (durable), selected via new `configure_api()`/`configure_rollback_manager()` calls in `src/tools.py`, invoked from `MedicalDocumentationAgent.__init__` based on `use_mock_api`. This also fixes a real bug: `create_document`/`update_document`/`update_form_answer` (`src/tools.py`) previously took an `api: Optional[MockAPI] = None` parameter that was never actually populated — LangChain's tool-calling can't route a non-JSON-serializable argument like an API client through the LLM — so all writes silently went to `MockAPI` regardless of mode.
 **Options:**
 1. Module-level mutable "active API" set once at agent construction (what's drafted) — smallest change, matches the existing module-singleton pattern already used for `rag_pipeline`/`knowledge_retrieval` in `tools.py`.
 2. Thread the API/storage objects through `AgentState` or LangGraph's config/context instead of a module global — no mutable global state, safer if multiple agents/modes ever run concurrently in one process.
 3. Separate tool sets per mode (e.g. `PRODUCTION_TOOLS` / `EVAL_TOOLS` lists), bound to the agent executor at construction.
 **Recommendation:** (1) for now as the minimal fix; revisit toward (2) if/when concurrent multi-mode execution in one process becomes a real requirement — module-level state is fine for a single agent instance per process, which is the current usage pattern.
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Confirmed (1) — and unlike most of the drafted Postgres work, this one is actually implemented and code-complete already: `tool_impl._active_api`, `configure_api()`/`configure_rollback_manager()`, wired from `MedicalDocumentationAgent.__init__`. Same unverified-at-runtime caveat as E1/E3/B4 (needs Postgres to exercise the production path). Note this module-global design is also what F4's `safety_evaluator` fix explicitly relies on and documents the concurrency caveat for — if E5 is ever revisited toward option (2), F4's `api_class` capture should be revisited alongside it.
 
 ### E6. Local dev environment — docker-compose scope
-**Status:** Open
+**Status:** Decided — Postgres-only compose (not yet implemented)
 **Context:** Originally scoped as just "single `docker run` command for Postgres" (this project's earlier, narrower framing chose "rollback + document/form store" without the broader "docker-compose + local dev setup" tier). Revisited because the trigger condition named in that original framing — "revisit once there's a second or third service to coordinate" — is now true: local dev involves Qdrant (currently a manual `docker run` in `SETUP.md`, no volume — see below), Postgres (not yet documented at all), and the app/MCP server (`src/mcp_server.py`, drafted). The MCP server's reuse case (Claude Desktop, etc.) expects a simple local spawn command (`python -m src.mcp_server`), not a containerized invocation — Claude Desktop-style config runs a local command, and while `docker run -i`/`docker compose exec` *can* keep stdin attached for a stdio server, it adds friction to the exact use case that motivated building it (B4).
 **Options:**
 1. `docker-compose.yml` for backing services only (Postgres + Qdrant) — one `docker compose up -d` replaces separate manual `docker run` commands. App/MCP server stays a local Python process. Add a documented (or compose one-off) `alembic upgrade head` migration step.
@@ -198,20 +230,20 @@ Additional concrete requirements, regardless of which option is chosen:
 - **Volumes:** today's `docker run ... qdrant/qdrant` command in `SETUP.md` mounts no volume — all indexed vectors are lost when the container is removed. Whatever ships needs named volumes for both Qdrant (`qdrant_data:/qdrant/storage`) and Postgres (`postgres_data:/var/lib/postgresql/data`).
 - **Networking convention:** `.env.example` should stay `localhost`-based (app runs locally outside compose, per the recommendation above) rather than needing compose-internal service-name hostnames — one config, not a split local/compose config.
 - **Startup ordering:** `depends_on` alone only waits for container start, not Postgres readiness — a migration step needs `depends_on: postgres: condition: service_healthy` with a real `pg_isready` healthcheck (common compose gotcha otherwise).
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Confirmed (1), **simplified by the C1 decision**: since C1 moved to Weaviate Cloud (managed, not self-hosted), local dev no longer needs a self-hosted vector-DB container at all — the Qdrant volume/healthcheck notes above are now moot for local dev (Weaviate Cloud has no local container to run). `docker-compose.yml` scope is now just **Postgres alone**: named volume, `pg_isready` healthcheck, a migration step depending on that healthcheck, app/MCP server still a local process. Not implemented today — needs J1 (deployment target) and the still-unverified E1/E3 Postgres code before there's something real to containerize the migration step against.
 
 ---
 
 ## F. Evaluation & Mock API
 
 ### F1. Mock/shadow API architecture
-**Status:** Open
+**Status:** Decided — hand-authored fixtures
 **Context:** `MockDatabase` (`src/mock_api.py:32`) is an in-process, in-memory structure seeded from an optional `snapshot_data` dict passed at construction time. No actual pipeline exists to produce that snapshot from a real production system — `SETUP.md`/`Medical_Documentation_Agentic_POC_Outline.md` describe periodic production snapshots, but nothing in `src/` generates one. Concrete example of this gap: `AgentEvaluator.evaluate_agent` (`src/evals.py:101-103`) has a commented-out call to `self._load_snapshot()` — a method that doesn't exist anywhere on the class. See F6 for the eval-specific version of this decision.
 **Options:**
 1. Build a real snapshot export job once a production data store exists to snapshot from.
 2. Keep hand-authored fixture snapshots for now (sufficient for current dev/demo needs).
 **Recommendation:** (2) until E1/production data infrastructure exists — there's no production system to snapshot from yet, so this is blocked on other decisions, not on `mock_api.py` itself.
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Adopting (2): hand-authored fixtures for now (F6 already did exactly this for eval runs specifically — `tests/fixtures/eval_snapshot.json`). Revisit a real snapshot export pipeline once E1/E3 (production Postgres store) actually holds real data.
 
 ### F2. Evaluation framework
 **Status:** Decided
@@ -254,7 +286,7 @@ Not done in this pass: `safety_evaluator` (F4) — separate decision, unchanged 
 **Decision:** 2026-09-02 — Implemented option (1). `evaluate_agent` (`src/evals.py`) now captures `type(tool_impl._active_api).__name__` immediately after each run and returns it as `api_class`; `safety_evaluator` scores 0.0 if that isn't `"MockAPI"`. Caveat documented in `evaluate_agent`'s docstring: `tool_impl._active_api` is process-global mutable state (ADR E5's already-accepted limitation), so under `run_evaluation()`'s `max_concurrency=2` this snapshot isn't a hard per-run guarantee — it's still strictly more signal than the previous hardcoded 1.0, but not airtight under concurrent eval runs. Fixing that fully means revisiting E5's global-state design, which is out of scope here.
 
 ### F5. Eval dataset scope
-**Status:** Open
+**Status:** Decided — deferred
 **Context:** `create_eval_dataset()` (`src/evals.py:241-301`) hardcodes 2 examples, with an in-code comment acknowledging more are needed (different device types, regulatory classes, edge cases). Ties to C3 (real FDA data ingestion still pending) and mirrors C4's sequencing.
 **Options:**
 1. Expand the hardcoded list manually as scenarios are identified.
@@ -361,23 +393,23 @@ Option (2) (secrets manager for production) remains open, tied to J1.
 1. Explicitly define what compliance/audit guarantees are actually required (retention period, immutability, who can read the audit log) before finalizing E1.
 2. Proceed without a defined compliance target and revisit if/when a client or regulatory requirement surfaces.
 **Recommendation:** (1) — this should be resolved early since it directly constrains E1's design (an event-sourced immutable log vs. a mutable Postgres table are very different commitments), not treated as a later add-on.
-**Decision:** _(pending)_
+**Decision:** _(pending — discussed 2026-09-17, deliberately left open: no real compliance/legal requirement has been defined yet, so no retention/immutability answer was guessed at. Revisit when a client or regulatory requirement actually surfaces. Note this is a soft dependency for E1/E6/J1 — those proceeded on the assumption of a standard mutable Postgres table; if I2 later comes back requiring immutability, E1's storage design needs revisiting toward event-sourcing.)_
 
 ### I3. Multi-tenancy enforcement
-**Status:** Open
+**Status:** Decided — enforce required (not yet implemented)
 **Context:** `client_id` is threaded through `RollbackManager`, `MockAPI`, and `KnowledgeRetrieval` as an optional filter parameter (e.g. `src/rollback.py:71`, `:196`), but nothing enforces isolation — it's a value callers may or may not pass, not a hard boundary. There's no row-level security or namespace enforcement at the storage layer.
 **Options:**
 1. Enforce `client_id` as a required, non-optional parameter everywhere client data is touched, with storage-layer enforcement (e.g. Postgres row-level security once E1 lands, separate Qdrant collections/namespaces per client).
 2. Leave as an application-level convention, trusted to be passed correctly by callers.
 **Recommendation:** (1) before any real multi-client data coexists — the current optional/best-effort filtering is a real risk of cross-client data leakage the moment this handles more than one client's actual data.
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Adopting (1): `client_id` becomes required, non-optional, with storage-layer enforcement once E1 lands. Not implemented today — this is invasive (changes signatures across `tool_impl.py`, `rollback.py`, `knowledge_retrieval.py`, and the `@tool`/`@mcp_app.tool()` schemas the LLM/MCP clients see) and needs its own dedicated pass rather than a quick edit; also blocked on E1 actually being verified before "storage-layer enforcement" (Postgres RLS) is buildable.
 
 ---
 
 ## J. Deployment & Infrastructure
 
 ### J1. Deployment target
-**Status:** Open
+**Status:** Decided — AWS (not yet implemented)
 **Context:** No `Dockerfile`, no CI configuration, and no infrastructure-as-code exist anywhere in the repo. `SETUP.md` only documents local `docker run` for Qdrant, not for the application itself.
 **Options:**
 1. Containerize the application (Dockerfile + docker-compose for local dev with Qdrant/Postgres), deploy to a cloud provider with managed Postgres + Qdrant Cloud.
@@ -387,17 +419,24 @@ Option (2) (secrets manager for production) remains open, tied to J1.
 Additional notes from the E6 discussion:
 - The app image used for local compose and the one deployed to production should be the *same* Dockerfile — compose (E6) is a dev-only orchestration layer around it, not a second app definition to maintain.
 - Explicit warning for whoever implements this: local compose's `env_file: .env` convention (fine for local, same trust boundary as running locally today) must not carry over to production — no secrets baked into the image via `COPY .env` or Dockerfile `ENV`/`ARG`. Ties directly to I1.
-- The same compose stack (E6) is also the natural way to give **CI** real Postgres/Qdrant for integration tests (once G1/J1 land), rather than mocking the DB layer in tests — avoids needing cloud credentials in CI.
-**Decision:** _(pending)_
+- The same compose stack (E6) is also the natural way to give **CI** real Postgres/Qdrant for integration tests (once G1/J1 land), rather than mocking the DB layer in tests — avoids needing cloud credentials in CI. (Note: post-C1, "Qdrant" here means Postgres only for the local/CI compose stack — Weaviate Cloud has no local container.)
+**Decision:** 2026-09-17 — Adopting (1) with a provider named: **AWS**. Containerize the app, deploy to AWS, managed Postgres (RDS) for E1/E3's storage, Weaviate Cloud (C1) for vector search — not self-hosted on AWS. Not implemented today — this is a real build (Dockerfile, AWS deployment config, RDS provisioning) that depends on E1/E3's Postgres code actually being verified first, and should happen after that rather than in parallel with it.
 
 ### J2. Observability
-**Status:** Open
-**Context:** Beyond optional LangSmith tracing (env-gated via `LANGCHAIN_TRACING_V2`), there is no structured logging, metrics, or error tracking anywhere in `src/`.
+**Status:** Decided — implemented
+**Context:** Beyond optional LangSmith tracing (env-gated via `LANGCHAIN_TRACING_V2`), there was no structured logging, metrics, or error tracking anywhere in `src/`.
 **Options:**
 1. Add structured logging (e.g. `structlog`) plus an error tracker (e.g. Sentry) alongside LangSmith tracing.
 2. Rely on LangSmith alone.
 **Recommendation:** (1) — LangSmith covers LLM/agent traces well but won't surface infrastructure-level failures (DB connection errors, API timeouts); those need conventional logging/error tracking regardless of the LLM tooling choice.
-**Decision:** _(pending)_
+**Decision:** 2026-09-17 — Implemented option (1) with `structlog` + Sentry, as originally suggested:
+- New `src/observability.py`: `init_observability()` (idempotent, call once at process startup) configures `structlog` (console renderer in dev, JSON in production — via the new `ENVIRONMENT` setting) and initializes Sentry only if `SENTRY_DSN` is set — fully optional, same no-op-if-unset pattern as `QDRANT_API_KEY`/`DATABASE_URL`. Deliberately *not* a module-level side effect on import, so importing `src.agent`/`src.rollback`/etc. for tests doesn't implicitly configure logging or phone home to Sentry.
+- `src/config.py` gained `environment`, `log_level`, `sentry_dsn` settings.
+- Wired into the two places that were actually swallowing exceptions (found by checking every `except` block in `src/` — the `_ensure_collection(s)` try/excepts in `rag_pipeline.py`/`knowledge_retrieval.py` are normal "create if missing" control flow, not errors, so deliberately left alone): `RollbackAPI.execute_with_rollback` (`src/rollback.py` — this is the *only* place that exception is ever visible, since it's converted to a return value rather than re-raised) and `src/db.py`'s `get_session()` (logs before re-raising).
+- Added operational logging in `src/agent.py`: phase start/completion, and — tying directly into F3's work — a warning log every time `_extract_tool_errors` finds a new tool failure. `src/mcp_server.py` logs which `MCP_SERVER_MODE` was actually configured at startup, the same mode-wiring bug class F4's `safety_evaluator` was built to catch, now visible here too even though nothing evaluates this server.
+- `run_agent.py`, `run_evals.py`, `src/mcp_server.py` each call `init_observability()` once at startup. (Found and removed an unused `import asyncio` in `run_agent.py` while touching that file's imports.)
+- `requirements.txt`: added `structlog`, `sentry-sdk`. `.env.example`: added `ENVIRONMENT`, `LOG_LEVEL`, `SENTRY_DSN`.
+- **Verified, not just compiled:** ran the full 35-test suite (still passes), and directly exercised `init_observability()` in both dev (console renderer) and production (JSON renderer) modes, with and without a `SENTRY_DSN` set, plus a live smoke test that triggers `execute_with_rollback`'s real exception-handling path and confirms the structured log line and return value are both correct.
 
 ---
 
@@ -440,24 +479,24 @@ Broader K1 gap not yet addressed: `QUICKSTART.md`/`SETUP.md` still reference oth
 
 | # | Decision | Status |
 |---|----------|--------|
-| A1 | Source of truth for requirements | Open |
+| A1 | Source of truth for requirements | Decided — POC outline is source of truth |
 | B1 | LLM provider and model selection | Decided — partially implemented |
-| B2 | Agent orchestration framework | Open |
+| B2 | Agent orchestration framework | Decided — modernize (not yet implemented) |
 | B3 | Planning-phase output parsing | Decided — implemented |
-| B4 | Tool invocation architecture — direct calls vs. MCP | Open |
-| C1 | Vector database choice | Open |
-| C2 | Embedding model | Open |
-| C3 | Real FDA 510(k) data ingestion | Open |
-| C4 | Hybrid retrieval tuning methodology | Open |
-| D1 | Global vs. client knowledge conflict resolution | Open |
+| B4 | Tool invocation architecture — direct calls vs. MCP | Decided — implemented (unverified) |
+| C1 | Vector database choice | Decided — switch to Weaviate Cloud (not yet implemented) |
+| C2 | Embedding model | Decided — bundled with C1/C3 (not yet implemented) |
+| C3 | Real FDA 510(k) data ingestion | Decided — openFDA API (not yet implemented) |
+| C4 | Hybrid retrieval tuning methodology | Decided — sequence after C3 |
+| D1 | Global vs. client knowledge conflict resolution | Decided — human-in-the-loop (not yet implemented) |
 | D2 | Fact-extraction pipeline | Decided — deferred |
 | E1 | Rollback storage backend | Decided (direction) |
 | E2 | Multi-resource transaction atomicity | Decided — implemented |
 | E3 | Production document/form data store | Decided (direction) |
-| E4 | Storage schema shape: JSON vs. normalized | Open |
-| E5 | Mode-based storage wiring (eval vs. production) | Open |
-| E6 | Local dev environment — docker-compose scope | Open |
-| F1 | Mock/shadow API architecture | Open |
+| E4 | Storage schema shape: JSON vs. normalized | Decided — hybrid, matches draft |
+| E5 | Mode-based storage wiring (eval vs. production) | Decided — implemented (unverified) |
+| E6 | Local dev environment — docker-compose scope | Decided — Postgres-only compose (not yet implemented) |
+| F1 | Mock/shadow API architecture | Decided — hand-authored fixtures |
 | F2 | Evaluation framework | Decided |
 | F3 | Evaluator correctness: isolation, error signal, unused ground truth | Decided — implemented |
 | F4 | Safety evaluator is a stub | Decided — implemented |
@@ -470,9 +509,9 @@ Broader K1 gap not yet addressed: `QUICKSTART.md`/`SETUP.md` still reference oth
 | H1 | Service exposure | Decided — CLI/stdio only |
 | I1 | Secrets and config management | Decided — implemented (partially) |
 | I2 | Regulatory/compliance posture | Open |
-| I3 | Multi-tenancy enforcement | Open |
-| J1 | Deployment target | Open |
-| J2 | Observability | Open |
+| I3 | Multi-tenancy enforcement | Decided — enforce required (not yet implemented) |
+| J1 | Deployment target | Decided — AWS (not yet implemented) |
+| J2 | Observability | Decided — implemented |
 | K1 | Docs/code reconciliation | Decided — implemented (partially) |
 | K2 | Separation of engineering docs vs. fundraising material | Decided — leave as-is (external link) |
 | K3 | Unused dependency: sentence-transformers | Decided — implemented |
